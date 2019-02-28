@@ -17,7 +17,9 @@ import unicodedata
 import json
 from random import randint
 from time import sleep
-
+#from selenium.common.exceptions import ElementNotVisibleException, StaleElementReferenceException
+from progress_bar import progress
+#from selenium.webdriver.common.keys import Keys
 
 nlu = NaturalLanguageUnderstandingV1(version=_config.nlu_credentials["version"], username=_config.nlu_credentials["username"],
                                         password=_config.nlu_credentials["password"])
@@ -112,6 +114,10 @@ def store_abstracts(link, webbrowser, db):
         except:
             pass
     
+    if 'abstract' in publication_data.keys() and publication_data['abstract']['text']:
+        refs = add_references(webbrowser, db)
+        publication_data['references'] = refs
+        
     db.client.insert_one(publication_data)
 
     return(webbrowser, db)
@@ -131,7 +137,7 @@ def scrape():
     url = prev_progress['last_page']
 #    url = 'https://www.researchgate.net/search/publications?q=marine%2Bscience&page=1'
     
-    browser = _connections.sel_scraper()
+    browser = _connections.sel_scraper(headless = False)
     
     while True:
         
@@ -144,15 +150,19 @@ def scrape():
             paper_links = [i.split('?')[0] for i in paper_links]
             
             if len(paper_links) == 0:
+                DB.disconnect()
+                browser.close()
                 raise ValueError()
                 
         except:
             with open(os.path.join(cur_path, 'last_error.json'), 'w') as fp:
                 json.dump({'last_page':url}, fp) 
             DB.disconnect()
+            browser.close()
             raise IndexError()
                                 
         for p_link in paper_links:
+#            dfas
             try:
                 len(DB.client.find_one({'url_tag': p_link}))
                 print('Article already archived, skipping')
@@ -168,57 +178,245 @@ def scrape():
                     with open(os.path.join(cur_path, 'last_error.json'), 'w') as fp:
                         json.dump({'error_link': p_link, 'last_page':url}, fp)                
                     DB.disconnect()
+                    browser.close()
                     raise ValueError()
         url = next_page(url)
 
 
-def see_all(_browser):
-#    _browser = browser
-    click_more = True
-    while click_more:
-        sleep(.25)
-        try:
-            see_more = _browser.find_elements_by_xpath('//div[@class="publication-citations__more"]/button')[-1]
-        except IndexError:
-            click_more = False
-            break
-        try:
-            see_more.click()
-        except Exception as e:
-            print(e)
-            pass
+def add_references(_webbrowser, _db):
+        article_tree = html.fromstring(_webbrowser.page_source)
+#        if len(article_tree.xpath('//div[@class="temporarily-blocked"]')) > 0:
+#            DB.disconnect()
+#            _webbrowser.close()
+#            DB = None
+#            _webbrowser = None
+#            raise ValueError('Login Error')
+##            login(browser, url)
+            
+        if len(article_tree.xpath('//div[@class="captcha-container js-widgetContainer"]')) > 0:
+            _db.disconnect()
+            _webbrowser.close()
+            _db = None
+            _webbrowser = None
+            print('Captcha Activated')
+#            return(False)
+            raise ValueError('Captcha Activated')
 
+        article_tree = html.fromstring(_webbrowser.page_source)
 
-def load_ref_page(_browser):
+        if True:
+            sleep(1) 
+            if len(_webbrowser.find_elements_by_xpath('//div[@class="nova-c-nav__wrapper"]/div[@class="nova-c-nav__items"]/button')) == 0:
+#                continue
+                raise Exception('No References')
+            article_tree = html.fromstring(_webbrowser.page_source)    
+            
+            ref_tabs = article_tree.xpath('//div[@class="nova-c-nav__wrapper"]/div[@class="nova-c-nav__items"]/button/span/div/text()')
+            ref_tab = [i for i in ref_tabs if 'references' in i.lower()][0]
+            
+            sel_refs = True
+            if len(article_tree.xpath('//button[@class="nova-c-nav__item is-selected references js-lite-click" and ./span/div="%s"]' % (ref_tab))) > 0:
+                sel_refs = False
+            if len(article_tree.xpath('//button[@class="nova-c-nav__item references js-lite-click is-selected" and ./span/div="%s"]' % (ref_tab))) > 0:
+                sel_refs = False
+            ref_button = _webbrowser.find_elements_by_xpath('//button[./span/div="%s"]' % (ref_tab))
+            _webbrowser.execute_script("window.scrollTo(0, %i);" % (ref_button[0].location['y'] - 100))
+
+                
+            if sel_refs:
+                article_tree = html.fromstring(_webbrowser.page_source)    
+                if len(article_tree.xpath('//button[@class="nova-c-nav__item is-selected references js-lite-click" and ./span/div="%s"]' % (ref_tab))) > 0:
+                    sel_refs = False
+                elif len(article_tree.xpath('//button[@class="nova-c-nav__item references js-lite-click is-selected" and ./span/div="%s"]' % (ref_tab))) > 0:
+                    sel_refs = False
+                else:
+                        ref_button = _webbrowser.find_elements_by_xpath('//button[./span/div="%s"]' % (ref_tab))
+                        _webbrowser.execute_script("window.scrollTo(0, %i);" % (ref_button[-1].location['y'] - 100))
+                        ref_button[-1].click()
+                        sel_refs = False
+
+            article_tree = html.fromstring(_webbrowser.page_source)
+            init_see_more = len(article_tree.xpath('//button[./span="Show more"]'))
+            see_more = len(article_tree.xpath('//button[./span="Show more"]'))
+            num_fails = 0
+            while see_more == init_see_more:
+                if see_more == 0:
+                    break
+                sleep(1)  
+                load_fail = _load_more(_webbrowser)
+                if load_fail:
+                    num_fails += 1
+                if num_fails > 20:
+                    _db.disconnect()
+                    _webbrowser.close()
+                    _db = None
+                    _webbrowser = None
+                    print('Ref Error')
+        #            return(False)
+                    raise IndexError('Ref Error')                   
+
+                article_tree = html.fromstring(_webbrowser.page_source)
+                see_more = len(article_tree.xpath('//button[./span="Show more"]'))
+                
+        article_tree = html.fromstring(_webbrowser.page_source)
+                
+        references = article_tree.xpath('//div[@class="nova-v-publication-item__stack-item"]/div/a/@href')
+        references = [i.split('?_sg')[0] for i in references]
+        return(references)
+        
+
+def login(_browser, _url):
+#    _browser, _url = browser, url
+    
+    link = _browser.find_element_by_link_text('Log in')
+    link.click()
+
+    username = _browser.find_element_by_name("login")
+    password = _browser.find_element_by_name("password")
+      
     try:
-        ref_tab = _browser.find_elements_by_xpath('//button[@class="nova-c-nav__item references js-lite-click"]')[-1]
-        ref_tab.click()
+        username.send_keys(_config.research_gate_user)
     except:
         pass
 
+    password.send_keys(_config.DB_PW)
+    
+    
+    _browser.find_elements_by_xpath('//button[@class="nova-c-button nova-c-button--align-center nova-c-button--radius-m nova-c-button--size-m nova-c-button--color-blue nova-c-button--theme-solid nova-c-button--width-full action-submit"]')[-1].click()  
+    _browser.get(_url) 
+    
+    return(_browser)
+            
 
+def _load_more(_browser):
+    try:
+        try:
+            _load_button = _browser.find_elements_by_xpath('//button[./span="Show more"]')[0]
+            _browser.execute_script("window.scrollTo(0, %i);" % (_load_button.location['y'] - 100))
+            _load_button.click()
+            return(False)
+        except:
+            _load_button = _browser.find_elements_by_xpath('//button[./span="Show more"]')[-1]
+            _browser.execute_script("window.scrollTo(0, %i);" % (_load_button.location['y'] - 100))
+            _load_button.click()
+            return(False)
+    except:
+        return(True) 
+                
+                
 def add_refs():
     DB = _connections.db_connection('mongo')
-    browser = _connections.sel_scraper(headless = True)
+    browser = _connections.sel_scraper(headless = False)
 
-    for doc in DB.client.find():
-        if 'abstract' not in doc.keys():
-            continue
-        if 'references' in doc.keys():
-            continue
-        
-        print(doc['url_tag'])
+#    total = DB.client.find({'references': {'$exists': False}, 'abstract': {'$exists': True}}).count()
+    total = DB.client.find({'references': [], 'abstract': {'$exists': True}}).count()
+    
+    print('%i Documents need updating' % (total))
+#    for doc_num, (doc) in enumerate(DB.client.find({'references': {'$exists': False}, 'abstract': {'$exists': True}})):
+    for doc_num, (doc) in enumerate(DB.client.find({'references': [], 'abstract': {'$exists': True}})):
+#        if doc_num < 7:
+#            continue
+#        sdafaf
+#        print(doc['url_tag'])
         url = 'https://www.researchgate.net/'+doc['url_tag']
         sleep(randint(10,100)/25)
-        
+
         browser.get(url) 
         article_tree = html.fromstring(browser.page_source)
-#        if len(article_tree.xpath('//button[@class="nova-c-nav__item is-selected references js-lite-click"]')) == 0:
-        load_ref_page(browser)           
-        see_all(browser)
+        if len(article_tree.xpath('//div[@class="temporarily-blocked"]')) > 0:
+            DB.disconnect()
+            browser.close()
+            DB = None
+            browser = None
+            raise ValueError('Login Error')
+#            login(browser, url)
+            
+        if len(article_tree.xpath('//div[@class="captcha-container js-widgetContainer"]')) > 0:
+            DB.disconnect()
+            browser.close()
+            DB = None
+            browser = None
+            print('Captcha Activated')
+#            return(False)
+            raise ValueError('Captcha Activated')
+            
         article_tree = html.fromstring(browser.page_source)
-        references = article_tree.xpath('//div[@itemprop="citation"]/div/div/div/div/a/@href')    
+        if True:
+            sleep(1) 
+            if len(browser.find_elements_by_xpath('//div[@class="nova-c-nav__wrapper"]/div[@class="nova-c-nav__items"]/button')) == 0:
+                continue
+                raise Exception('No References')
+            article_tree = html.fromstring(browser.page_source)    
+            
+            ref_tabs = article_tree.xpath('//div[@class="nova-c-nav__wrapper"]/div[@class="nova-c-nav__items"]/button/span/div/text()')
+            ref_tab = [i for i in ref_tabs if 'references' in i.lower()][0]
+            
+            sel_refs = True
+            if len(article_tree.xpath('//button[@class="nova-c-nav__item is-selected references js-lite-click" and ./span/div="%s"]' % (ref_tab))) > 0:
+                sel_refs = False
+            if len(article_tree.xpath('//button[@class="nova-c-nav__item references js-lite-click is-selected" and ./span/div="%s"]' % (ref_tab))) > 0:
+                sel_refs = False
+            ref_button = browser.find_elements_by_xpath('//button[./span/div="%s"]' % (ref_tab))
+            browser.execute_script("window.scrollTo(0, %i);" % (ref_button[0].location['y'] - 100))
+
+                
+            if sel_refs:
+                article_tree = html.fromstring(browser.page_source)    
+                if len(article_tree.xpath('//button[@class="nova-c-nav__item is-selected references js-lite-click" and ./span/div="%s"]' % (ref_tab))) > 0:
+                    sel_refs = False
+                elif len(article_tree.xpath('//button[@class="nova-c-nav__item references js-lite-click is-selected" and ./span/div="%s"]' % (ref_tab))) > 0:
+                    sel_refs = False
+                else:
+                        ref_button = browser.find_elements_by_xpath('//button[./span/div="%s"]' % (ref_tab))
+                        browser.execute_script("window.scrollTo(0, %i);" % (ref_button[-1].location['y'] - 100))
+                        ref_button[-1].click()
+                        sel_refs = False
+
+            article_tree = html.fromstring(browser.page_source)
+            init_see_more = len(article_tree.xpath('//button[./span="Show more"]'))
+            see_more = len(article_tree.xpath('//button[./span="Show more"]'))
+            num_fails = 0
+            while see_more == init_see_more:
+                if see_more == 0:
+                    break
+                sleep(1)  
+                load_fail = _load_more(browser)
+                if load_fail:
+                    num_fails += 1
+                if num_fails > 20:
+                    DB.disconnect()
+                    browser.close()
+                    DB = None
+                    browser = None
+                    print('Ref Error')
+        #            return(False)
+                    raise IndexError('Ref Error')                   
+
+                article_tree = html.fromstring(browser.page_source)
+                see_more = len(article_tree.xpath('//button[./span="Show more"]'))
+                
+        article_tree = html.fromstring(browser.page_source)
+                
+#        article_tree = html.fromstring(browser.page_source) 
+        references = article_tree.xpath('//div[@class="nova-v-publication-item__stack-item"]/div/a/@href')
+        references = [i.split('?_sg')[0] for i in references]
+        
+#        references = article_tree.xpath('//div[@itemprop="citation"]/div/div/div/div/a/@href')    
         DB.client.update_one({'_id': doc['_id']}, {'$set': {'references': references}})
-              
+        progress(doc_num+1, total, status = '%i' % (doc_num+1))
+    
+
 if __name__ == '__main__':
-    add_refs()
+    try:                                            # if running in CLI
+        os.path.abspath(__file__)
+        CLI = True
+    except NameError:                               # if running in IDE
+        CLI = False
+    
+    if CLI:
+        scrape()
+#        while True:
+#            try:
+#                add_refs()
+#            except IndexError:
+#                pass
